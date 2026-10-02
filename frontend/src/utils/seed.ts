@@ -32,10 +32,15 @@ function plantingRow(row: Omit<Planting, 'createdAt' | 'updatedAt' | 'revision'>
   return { ...row, createdAt: SEED_TIME, updatedAt: SEED_TIME, revision: ROW_REVISION };
 }
 
-function surveyRow(row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate'>, total: number): Survey {
+function surveyRow(
+  row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate' | 'plantedTotal' | 'replantBoost'>,
+  total: number,
+): Survey {
   const survivalRate = calcSurvivalRate(row.aliveCount, total);
   return {
     ...row,
+    plantedTotal: total,
+    replantBoost: 0,
     survivalRate,
     grade: rateLevel(survivalRate),
     gradeManual: false,

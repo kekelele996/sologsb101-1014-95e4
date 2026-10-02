@@ -1,6 +1,7 @@
 /**
  * 成活率派生 hook
  * 按地块与测次算成活率、株高增幅与补植建议；被验收台与补植计划页复用。
+ * 每个测次的成活率固定用「验收当天锁定的栽植总株数」作分母，台账后续新增栽植不影响已定测次。
  */
 import { useEffect, useMemo, useState } from 'react';
 import { liveQuery } from 'dexie';
@@ -14,6 +15,7 @@ import {
   rateLevel,
   round1,
   suggestReplantCount,
+  surveyDenominator,
 } from '../utils/rate';
 
 /** 单个测次的成活率数据点 */
@@ -21,9 +23,14 @@ export interface SurvivalPoint {
   surveyId: string;
   round: number;
   date: string;
+  /** 验收实测成活株数（不含补植增补） */
   aliveCount: number;
+  /** 补植完成后增补到本测次的成活株数（单独标出） */
+  replantBoost: number;
+  /** 验收当天锁定的栽植总株数（分母快照） */
+  plantedTotal: number;
   avgHeightCm: number;
-  /** 该测次的成活率（%） */
+  /** 该测次的成活率（%）=（实测 + 增补）/ 锁定分母 */
   rate: number;
   /** 是否被人工复核过等级 */
   gradeManual: boolean;
@@ -64,6 +71,7 @@ export function buildSurvivalSummary(
   plantings: Planting[],
   threshold: number = SURVIVAL_WARN_RATE,
 ): SurvivalSummary {
+  // 地块当前栽植总株数（台账现值），仅用于无测次兜底与老数据分母估算
   const totalCount = plantings
     .filter((row) => row.plotId === plotId)
     .reduce((acc, row) => acc + row.count, 0);
@@ -72,12 +80,17 @@ export function buildSurvivalSummary(
     .filter((row) => row.plotId === plotId)
     .sort((a, b) => a.round - b.round)
     .map((row) => {
-      const rate = totalCount > 0 ? calcSurvivalRate(row.aliveCount, totalCount) : row.survivalRate;
+      const boost = typeof row.replantBoost === 'number' ? row.replantBoost : 0;
+      // 分母固定取测次保存时锁定的值；老数据缺失时按现有总数估算
+      const denominator = surveyDenominator(row, totalCount);
+      const rate = denominator > 0 ? calcSurvivalRate(row.aliveCount + boost, denominator) : row.survivalRate;
       return {
         surveyId: row.id,
         round: row.round,
         date: row.date,
         aliveCount: row.aliveCount,
+        replantBoost: boost,
+        plantedTotal: denominator,
         avgHeightCm: row.avgHeightCm,
         rate,
         gradeManual: row.gradeManual,
@@ -99,7 +112,9 @@ export function buildSurvivalSummary(
     trend: latest && previous ? round1(latest.rate - previous.rate) : 0,
     heightDelta: growth.delta,
     heightPct: growth.pct,
-    suggestReplant: latest ? suggestReplantCount(totalCount, latest.aliveCount) : totalCount,
+    suggestReplant: latest
+      ? suggestReplantCount(latest.plantedTotal, latest.aliveCount + latest.replantBoost)
+      : totalCount,
     level: latest ? latest.level : 'poor',
     warn: latest !== null && latest.rate < threshold,
   };

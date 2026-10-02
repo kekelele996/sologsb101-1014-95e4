@@ -10,7 +10,7 @@ import type { Planting } from '../types/planting';
 import type { Seedling } from '../types/seedling';
 import type { Replant } from '../types/replant';
 import { RATE_LEVEL_LABEL } from '../types/survey';
-import { calcSurvivalRate, percentText, round1 } from './rate';
+import { calcSurvivalRate, effectiveAliveOf, percentText, round1, surveyDenominator } from './rate';
 import { stampSuffix } from './id';
 
 /** 触发浏览器下载 */
@@ -96,7 +96,9 @@ export function exportSummaryCsv(
     '栽植总株数(株)',
     '测次数',
     '最新测次',
+    '验收锁定分母(株)',
     '最新成活株数',
+    '补植增补(株)',
     '最新成活率(%)',
     '判定等级',
     '平均株高(cm)',
@@ -112,7 +114,10 @@ export function exportSummaryCsv(
     const plotReplants = replants.filter((row) => row.plotId === plot.id);
     const total = plotPlantings.reduce((acc, row) => acc + row.count, 0);
     const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
-    const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    // 与台账 / 验收台同一口径：分母取测次验收当天锁定的值，分子 = 实测成活 + 补植增补
+    const denominator = latest ? surveyDenominator(latest, total) : 0;
+    const boost = latest ? effectiveAliveOf(latest) - latest.aliveCount : 0;
+    const rate = latest ? calcSurvivalRate(latest.aliveCount + boost, denominator) : 0;
     lines.push(
       [
         plot.name,
@@ -126,7 +131,9 @@ export function exportSummaryCsv(
         total,
         plotSurveys.length,
         latest ? `第 ${latest.round} 测次` : '未验收',
+        latest ? denominator : 0,
         latest ? latest.aliveCount : 0,
+        latest ? boost : 0,
         round1(rate),
         latest ? RATE_LEVEL_LABEL[latest.grade] : '—',
         latest ? latest.avgHeightCm : 0,
@@ -179,12 +186,16 @@ export function buildSummaryText(
     const total = plantings.filter((row) => row.plotId === plot.id).reduce((acc, row) => acc + row.count, 0);
     const plotSurveys = surveys.filter((row) => row.plotId === plot.id).sort((a, b) => a.round - b.round);
     const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
-    const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    // 与页面同一口径：分母用测次锁定的值，分子含补植增补；有增补时单独标出
+    const denominator = latest ? surveyDenominator(latest, total) : 0;
+    const boost = latest ? effectiveAliveOf(latest) - latest.aliveCount : 0;
+    const rate = latest ? calcSurvivalRate(latest.aliveCount + boost, denominator) : 0;
+    const boostText = boost > 0 ? `（含补植增补 ${boost} 株）` : '';
     const pending = replants.filter((row) => row.plotId === plot.id && row.state !== '已复核').length;
     lines.push(
       `· ${plot.name}（${plot.tideZone}潮位带 / ${plot.substrate}）栽植 ${total} 株，最新成活率 ${
         latest ? percentText(rate) : '未验收'
-      }，缺株 ${plot.missingCount} 株，待办补植 ${pending} 条`,
+      }${boostText}，缺株 ${plot.missingCount} 株，待办补植 ${pending} 条`,
     );
   });
   return lines.join('\n');

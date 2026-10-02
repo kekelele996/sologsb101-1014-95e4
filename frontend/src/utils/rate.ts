@@ -2,10 +2,12 @@
  * 成活率与密度计算工具
  * - 亩 ↔ 平方米换算
  * - 成活率、成活率等级
+ * - 测次分母快照与补植增补的统一口径
  * - 栽植密度合理性校验阈值
  * - 株高增幅与补植建议
  */
-import { RATE_LEVEL_LABEL, type RateLevel } from '../types/survey';
+import { RATE_LEVEL_LABEL, type RateLevel, type Survey } from '../types/survey';
+import type { Planting } from '../types/planting';
 
 /** 1 亩 = 666.6667 平方米 */
 export const MU_TO_M2 = 666.6667;
@@ -44,6 +46,35 @@ export function m2ToMu(areaM2: number): number {
 export function calcSurvivalRate(aliveCount: number, totalCount: number): number {
   if (!Number.isFinite(aliveCount) || !Number.isFinite(totalCount) || totalCount <= 0) return 0;
   return round1(Math.max(0, Math.min(100, (aliveCount / totalCount) * 100)));
+}
+
+/**
+ * 验收当天的栽植总株数：该地块栽植日期不晚于指定日期的记录合计。
+ * 查不到（当日之前无任何栽植记录）时，按该地块现有栽植总数估算——
+ * 与旧数据升级「补齐当时分母，查不到的按现有总数估算」同一口径。
+ */
+export function plantedTotalOn(
+  plantings: Array<Pick<Planting, 'plotId' | 'plantDate' | 'count'>>,
+  plotId: string,
+  date: string,
+): number {
+  const rows = plantings.filter((row) => row.plotId === plotId);
+  const uptoDate = rows
+    .filter((row) => typeof row.plantDate !== 'string' || row.plantDate <= date)
+    .reduce((acc, row) => acc + (Number.isFinite(row.count) ? row.count : 0), 0);
+  if (uptoDate > 0) return uptoDate;
+  return rows.reduce((acc, row) => acc + (Number.isFinite(row.count) ? row.count : 0), 0);
+}
+
+/** 测次锁定的分母；老数据缺失时按给定兜底值（通常为该地块现有栽植总数）估算 */
+export function surveyDenominator(survey: Partial<Pick<Survey, 'plantedTotal'>>, fallbackTotal: number): number {
+  return typeof survey.plantedTotal === 'number' && survey.plantedTotal > 0 ? survey.plantedTotal : fallbackTotal;
+}
+
+/** 测次有效成活株数：验收实测值 + 补植增补（增补单独标出，不改写实测值） */
+export function effectiveAliveOf(survey: Pick<Survey, 'aliveCount'> & Partial<Pick<Survey, 'replantBoost'>>): number {
+  const boost = typeof survey.replantBoost === 'number' ? survey.replantBoost : 0;
+  return survey.aliveCount + boost;
 }
 
 /** 按成活率数值判定等级 */

@@ -1,7 +1,7 @@
 /**
  * IndexedDB 持久化层（Dexie 封装）
  * - 数据库名：gbmangrove
- * - 含数据结构版本号与 v1 → v2 升级迁移逻辑（升级时按 version().stores() 补齐索引）
+ * - 含数据结构版本号与 v1 → v2 → v3 升级迁移逻辑（升级时按 version().stores() 补齐索引）
  * - 提供各表增删改查、整库快照导入导出与重置
  * 纯前端应用：不依赖任何后端服务或外部接口。
  */
@@ -11,7 +11,7 @@ import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey } from '../types/survey';
 import type { Replant, ReplantState } from '../types/replant';
-import { rateLevel } from './rate';
+import { calcSurvivalRate, plantedTotalOn, rateLevel, surveyDenominator } from './rate';
 import { nowIso, today } from './id';
 import { seedDatabase } from './seed';
 
@@ -19,10 +19,10 @@ import { seedDatabase } from './seed';
 export const DB_NAME = 'gbmangrove';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据行结构修订号 */
-export const ROW_REVISION = 2;
+export const ROW_REVISION = 3;
 
 class MangroveDatabase extends Dexie {
   plots!: Table<Plot, string>;
@@ -44,7 +44,7 @@ class MangroveDatabase extends Dexie {
     });
 
     // ---------- v2：补齐索引与回写字段，并迁移历史数据 ----------
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         plots: 'id, name, tideZone, substrate, restoreMode, state, createdAt, updatedAt',
         seedlings: 'id, plotId, species, source, arrivalDate, quantity',
@@ -81,6 +81,30 @@ class MangroveDatabase extends Dexie {
           if (typeof row.gradeManual !== 'boolean') row.gradeManual = false;
         });
       });
+
+    // ---------- v3：测次分母快照 + 补植增补字段（索引结构不变，仅迁移数据） ----------
+    this.version(3).upgrade(async (tx) => {
+      const plantingRows = (await tx.table('plantings').toArray()) as Planting[];
+      await tx
+        .table('surveys')
+        .toCollection()
+        .modify((row: Record<string, unknown>) => {
+          // 迁移 1：补齐「补植增补」字段，默认 0
+          if (typeof row.replantBoost !== 'number') row.replantBoost = 0;
+          // 迁移 2：补齐验收当天的分母快照——按「栽植日期 ≤ 验收日期」的合计还原；
+          // 查不到当时分母的，按该地块现有栽植总数估算
+          if (typeof row.plantedTotal !== 'number' || row.plantedTotal <= 0) {
+            row.plantedTotal = plantedTotalOn(plantingRows, String(row.plotId), String(row.date));
+          }
+          // 迁移 3：按冻结口径重算成活率与等级（人工复核过的等级保持不动）
+          const total = row.plantedTotal as number;
+          if (total > 0 && typeof row.aliveCount === 'number') {
+            row.survivalRate = calcSurvivalRate(row.aliveCount + (row.replantBoost as number), total);
+            if (row.gradeManual !== true) row.grade = rateLevel(row.survivalRate as number);
+          }
+          row.revision = ROW_REVISION;
+        });
+    });
   }
 }
 
@@ -235,7 +259,9 @@ export async function removeReplant(id: string): Promise<void> {
 
 /**
  * 补植完成回写：
- * 1）扣减地块缺株数；2）写入最近补植日期；3）按补植后的总株数重算最新一次验收的成活率。
+ * 1）扣减地块缺株数；2）写入最近补植日期；
+ * 3）只把本次补植株数作为「增补」累计到最新测次（replantBoost 单独标出，不改写实测成活数），
+ *    并按该测次验收当天锁定的分母重算成活率；已定测次一律不动。
  */
 export async function applyReplantCompletion(replantId: string): Promise<void> {
   await db.transaction('rw', db.plots, db.replants, db.surveys, db.plantings, async () => {
@@ -251,16 +277,20 @@ export async function applyReplantCompletion(replantId: string): Promise<void> {
       updatedAt: nowIso(),
     });
 
-    const plantings = await db.plantings.where('plotId').equals(plot.id).toArray();
-    const total = plantings.reduce((acc, item) => acc + item.count, 0);
     const surveys = await db.surveys.where('plotId').equals(plot.id).toArray();
     if (surveys.length === 0) return;
     const latest = surveys.reduce((acc, item) => (item.round > acc.round ? item : acc));
-    // 补植后按「原成活株数 + 本次补植株数」重新计算成活率
-    const aliveAfter = latest.aliveCount + replant.missingCount;
-    const rate = total > 0 ? Math.round(Math.min(100, (aliveAfter / total) * 100) * 10) / 10 : latest.survivalRate;
+    // 分母取该测次验收当天锁定的值；老数据缺失时按现有栽植总数估算并顺手锁定
+    const plantings = await db.plantings.where('plotId').equals(plot.id).toArray();
+    const ledgerTotal = plantings.reduce((acc, item) => acc + item.count, 0);
+    const denominator = surveyDenominator(latest, ledgerTotal);
+    const previousBoost = typeof latest.replantBoost === 'number' ? latest.replantBoost : 0;
+    const boost = previousBoost + replant.missingCount;
+    const rate =
+      denominator > 0 ? calcSurvivalRate(latest.aliveCount + boost, denominator) : latest.survivalRate;
     await db.surveys.update(latest.id, {
-      aliveCount: aliveAfter,
+      replantBoost: boost,
+      plantedTotal: denominator,
       survivalRate: rate,
       grade: latest.gradeManual ? latest.grade : rateLevel(rate),
       updatedAt: nowIso(),
@@ -312,6 +342,24 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
 
 /** 用快照覆盖整库（导入存档） */
 export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> {
+  // 旧版本存档可能缺少测次分母快照 / 补植增补字段：按升级迁移同一口径补齐后再落库，
+  // 保证导入后的走势与导出和当前版本一致
+  const surveys: Survey[] = snapshot.surveys.map((row) => {
+    const replantBoost = typeof row.replantBoost === 'number' ? row.replantBoost : 0;
+    const plantedTotal = surveyDenominator(row, plantedTotalOn(snapshot.plantings, row.plotId, row.date));
+    const survivalRate =
+      plantedTotal > 0 ? calcSurvivalRate(row.aliveCount + replantBoost, plantedTotal) : row.survivalRate;
+    const gradeManual = row.gradeManual === true;
+    return {
+      ...row,
+      plantedTotal,
+      replantBoost,
+      survivalRate,
+      grade: gradeManual ? row.grade : rateLevel(survivalRate),
+      gradeManual,
+      revision: ROW_REVISION,
+    };
+  });
   await db.transaction('rw', db.plots, db.seedlings, db.plantings, db.surveys, db.replants, async () => {
     await Promise.all([
       db.plots.clear(),
@@ -323,7 +371,7 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.plots.bulkPut(snapshot.plots.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.seedlings.bulkPut(snapshot.seedlings.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.plantings.bulkPut(snapshot.plantings.map((row) => ({ ...row, revision: ROW_REVISION })));
-    await db.surveys.bulkPut(snapshot.surveys.map((row) => ({ ...row, revision: ROW_REVISION })));
+    await db.surveys.bulkPut(surveys);
     await db.replants.bulkPut(snapshot.replants.map((row) => ({ ...row, revision: ROW_REVISION })));
   });
 }

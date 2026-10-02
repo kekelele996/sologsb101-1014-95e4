@@ -5,10 +5,10 @@
  */
 import { create } from 'zustand';
 import type { RateLevel, Survey } from '../types/survey';
-import { db, initDatabase, patchSurveyGrades, putSurvey, removeSurvey } from '../utils/db';
+import { ROW_REVISION, db, initDatabase, patchSurveyGrades, putSurvey, removeSurvey } from '../utils/db';
 import type { SurvivalSummary } from '../hooks/useSurvivalRate';
 import { nowIso, uuid } from '../utils/id';
-import { calcSurvivalRate, rateLevel } from '../utils/rate';
+import { calcSurvivalRate, plantedTotalOn, rateLevel } from '../utils/rate';
 import type { SurveyDraft } from '../types/survey';
 import { usePlotStore } from './plotStore';
 
@@ -48,11 +48,9 @@ interface SurveyStoreState {
   rateStats: () => { total: number; warnCount: number; avgRate: number };
 }
 
-function totalPlantedOf(plotId: string): number {
-  return usePlotStore
-    .getState()
-    .plantings.filter((row) => row.plotId === plotId)
-    .reduce((acc, row) => acc + row.count, 0);
+/** 验收当天的栽植总株数：栽植日期不晚于验收日期的合计，查不到时按现有总数估算 */
+function plantedTotalAt(plotId: string, date: string): number {
+  return plantedTotalOn(usePlotStore.getState().plantings, plotId, date);
 }
 
 export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
@@ -84,8 +82,9 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
   },
 
   async createSurvey(draft) {
-    const total = totalPlantedOf(draft.plotId);
-    const survivalRate = calcSurvivalRate(draft.aliveCount, total);
+    // 保存测次时快照验收当天的栽植总株数作为分母，之后台账新增栽植不再影响本测次
+    const plantedTotal = plantedTotalAt(draft.plotId, draft.date);
+    const survivalRate = calcSurvivalRate(draft.aliveCount, plantedTotal);
     const stamp = nowIso();
     const row: Survey = {
       id: uuid('survey'),
@@ -94,12 +93,14 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       date: draft.date,
       aliveCount: draft.aliveCount,
       avgHeightCm: draft.avgHeightCm,
+      plantedTotal,
+      replantBoost: 0,
       survivalRate,
       grade: rateLevel(survivalRate),
       gradeManual: false,
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     };
     await putSurvey(row);
     set({ revision: get().revision + 1 });
@@ -109,8 +110,12 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
   async updateSurvey(surveyId, draft) {
     const existing = await db.surveys.get(surveyId);
     if (!existing) return;
-    const total = totalPlantedOf(draft.plotId);
-    const survivalRate = calcSurvivalRate(draft.aliveCount, total);
+    // 已定测次的分母保持冻结；仅当换了地块或老数据缺失分母时才按验收日期重估
+    const locked =
+      existing.plotId === draft.plotId && typeof existing.plantedTotal === 'number' && existing.plantedTotal > 0;
+    const plantedTotal = locked ? existing.plantedTotal : plantedTotalAt(draft.plotId, draft.date);
+    const replantBoost = typeof existing.replantBoost === 'number' ? existing.replantBoost : 0;
+    const survivalRate = calcSurvivalRate(draft.aliveCount + replantBoost, plantedTotal);
     await putSurvey({
       ...existing,
       plotId: draft.plotId,
@@ -118,6 +123,8 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       date: draft.date,
       aliveCount: draft.aliveCount,
       avgHeightCm: draft.avgHeightCm,
+      plantedTotal,
+      replantBoost,
       survivalRate,
     });
     set({ revision: get().revision + 1 });
@@ -154,7 +161,7 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       state: '待补植',
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: ROW_REVISION,
     });
     set({ revision: get().revision + 1, lastMessage: `已为「${plot.name}」生成补植计划：缺株 ${missing} 株` });
     return `已生成补植计划：缺株 ${missing} 株`;

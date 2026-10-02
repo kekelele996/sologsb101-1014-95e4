@@ -223,18 +223,39 @@ export default function SurveyBoard() {
       render: (value: number) => value.toLocaleString('zh-CN'),
     },
     {
+      title: '补植增补',
+      key: 'replantBoost',
+      width: 104,
+      align: 'center',
+      render: (_value, record) => {
+        const boost = typeof record.replantBoost === 'number' ? record.replantBoost : 0;
+        return boost > 0 ? (
+          <Tag color="green">+{boost.toLocaleString('zh-CN')} 株</Tag>
+        ) : (
+          <Typography.Text type="secondary">—</Typography.Text>
+        );
+      },
+    },
+    {
       title: '成活率',
       key: 'rate',
-      width: 180,
+      width: 190,
       render: (_value, record) => {
         const summary = summaryOf(record.plotId);
         const point = summary.points.find((item) => item.surveyId === record.id);
         return (
-          <RateTag
-            rate={point?.rate ?? record.survivalRate}
-            level={point?.level ?? record.grade}
-            manual={record.gradeManual}
-          />
+          <Space direction="vertical" size={0}>
+            <RateTag
+              rate={point?.rate ?? record.survivalRate}
+              level={point?.level ?? record.grade}
+              manual={record.gradeManual}
+            />
+            {point !== undefined ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                分母 {point.plantedTotal.toLocaleString('zh-CN')} 株 · 验收日锁定
+              </Typography.Text>
+            ) : null}
+          </Space>
         );
       },
     },
@@ -436,7 +457,7 @@ export default function SurveyBoard() {
             loading={loading || !ready}
             columns={columns}
             dataSource={filtered}
-            scroll={{ x: 1280 }}
+            scroll={{ x: 1400 }}
             rowSelection={{
               selectedRowKeys: selectedIds,
               onChange: (keys) => setSelectedIds(keys.map((key) => String(key))),
@@ -491,7 +512,8 @@ export default function SurveyBoard() {
             </Form.Item>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            成活率 = 成活株数 / 该地块栽植总株数，保存时自动计算；成活率低于 {SURVIVAL_WARN_RATE}% 会给出告警提示。
+            成活率 =（成活株数 + 补植增补）÷ 验收当天锁定的栽植总株数；测次保存后分母即冻结，
+            之后台账新增栽植只影响后续测次。成活率低于 {SURVIVAL_WARN_RATE}% 会给出告警提示。
           </Typography.Text>
         </Form>
       </Modal>
