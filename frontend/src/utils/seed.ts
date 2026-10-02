@@ -9,7 +9,7 @@ import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey } from '../types/survey';
 import type { Replant } from '../types/replant';
-import { calcSurvivalRate, rateLevel } from './rate';
+import { calcSurveySurvivalRate, rateLevel } from './rate';
 
 const SEED_TIME = '2025-01-06T02:00:00.000Z';
 
@@ -32,10 +32,28 @@ function plantingRow(row: Omit<Planting, 'createdAt' | 'updatedAt' | 'revision'>
   return { ...row, createdAt: SEED_TIME, updatedAt: SEED_TIME, revision: ROW_REVISION };
 }
 
-function surveyRow(row: Omit<Survey, 'createdAt' | 'updatedAt' | 'revision' | 'grade' | 'gradeManual' | 'survivalRate'>, total: number): Survey {
-  const survivalRate = calcSurvivalRate(row.aliveCount, total);
+function surveyRow(
+  row: Omit<
+    Survey,
+    | 'createdAt'
+    | 'updatedAt'
+    | 'revision'
+    | 'grade'
+    | 'gradeManual'
+    | 'survivalRate'
+    | 'denominator'
+    | 'denominatorEstimated'
+    | 'supplementCount'
+  >,
+  total: number,
+): Survey {
+  // 演示数据的栽植记录均早于验收日期，分母即为该地块栽植总数
+  const survivalRate = calcSurveySurvivalRate(row.aliveCount, 0, total);
   return {
     ...row,
+    denominator: total,
+    denominatorEstimated: false,
+    supplementCount: 0,
     survivalRate,
     grade: rateLevel(survivalRate),
     gradeManual: false,

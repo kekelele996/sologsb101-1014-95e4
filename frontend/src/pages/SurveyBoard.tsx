@@ -194,15 +194,30 @@ export default function SurveyBoard() {
     {
       title: '地块',
       key: 'plot',
-      width: 200,
-      render: (_value, record) => (
-        <Space direction="vertical" size={0}>
-          <span>{plotName(record.plotId)}</span>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            栽植总株数 {statOf(record.plotId).plantTotal.toLocaleString('zh-CN')} 株
-          </Typography.Text>
-        </Space>
-      ),
+      width: 220,
+      render: (_value, record) => {
+        const summary = summaryOf(record.plotId);
+        const point = summary.points.find((item) => item.surveyId === record.id);
+        const denominator = point?.denominator ?? record.denominator ?? 0;
+        return (
+          <Space direction="vertical" size={0}>
+            <span>{plotName(record.plotId)}</span>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              验收时分母 {denominator.toLocaleString('zh-CN')} 株
+              {point?.denominatorEstimated ? (
+                <Tag color="amber" style={{ marginLeft: 6 }}>
+                  估算
+                </Tag>
+              ) : null}
+              {(point?.supplementCount ?? 0) > 0 ? (
+                <Tag color="blue" style={{ marginLeft: 6 }}>
+                  增补 {point?.supplementCount.toLocaleString('zh-CN')}
+                </Tag>
+              ) : null}
+            </Typography.Text>
+          </Space>
+        );
+      },
     },
     {
       title: '测次',
@@ -491,7 +506,8 @@ export default function SurveyBoard() {
             </Form.Item>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            成活率 = 成活株数 / 该地块栽植总株数，保存时自动计算；成活率低于 {SURVIVAL_WARN_RATE}% 会给出告警提示。
+            成活率 =（成活株数 + 增补株数）/ 验收当天固定的栽植总数（仅计验收日及之前的栽植记录），保存时自动计算；
+            补植增补单独计入最新测次，已定测次不动。成活率低于 {SURVIVAL_WARN_RATE}% 会给出告警提示。
           </Typography.Text>
         </Form>
       </Modal>

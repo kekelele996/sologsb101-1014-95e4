@@ -515,7 +515,7 @@ export default function ReplantPlan() {
             </Form.Item>
           </Space>
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            状态推进到「已补植」时，会自动回写地块缺株数并重算最新一次验收的成活率。
+            状态推进到「已补植」时，会自动回写地块缺株数，并把补植株数作为「增补」单独累加进最新测次（不改动验收成活株数）、重算其成活率；早先已经定版的测次不动。
           </Typography.Text>
         </Form>
       </Modal>

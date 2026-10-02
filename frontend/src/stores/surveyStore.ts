@@ -8,7 +8,7 @@ import type { RateLevel, Survey } from '../types/survey';
 import { db, initDatabase, patchSurveyGrades, putSurvey, removeSurvey } from '../utils/db';
 import type { SurvivalSummary } from '../hooks/useSurvivalRate';
 import { nowIso, uuid } from '../utils/id';
-import { calcSurvivalRate, rateLevel } from '../utils/rate';
+import { calcSurveySurvivalRate, computeSurveyDenominator, rateLevel } from '../utils/rate';
 import type { SurveyDraft } from '../types/survey';
 import { usePlotStore } from './plotStore';
 
@@ -48,13 +48,6 @@ interface SurveyStoreState {
   rateStats: () => { total: number; warnCount: number; avgRate: number };
 }
 
-function totalPlantedOf(plotId: string): number {
-  return usePlotStore
-    .getState()
-    .plantings.filter((row) => row.plotId === plotId)
-    .reduce((acc, row) => acc + row.count, 0);
-}
-
 export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
   filters: { ...EMPTY_FILTERS },
   selectedIds: [],
@@ -84,8 +77,9 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
   },
 
   async createSurvey(draft) {
-    const total = totalPlantedOf(draft.plotId);
-    const survivalRate = calcSurvivalRate(draft.aliveCount, total);
+    const plantings = usePlotStore.getState().plantings;
+    const { denominator, estimated } = computeSurveyDenominator(draft.plotId, draft.date, plantings);
+    const survivalRate = calcSurveySurvivalRate(draft.aliveCount, 0, denominator);
     const stamp = nowIso();
     const row: Survey = {
       id: uuid('survey'),
@@ -94,12 +88,15 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       date: draft.date,
       aliveCount: draft.aliveCount,
       avgHeightCm: draft.avgHeightCm,
+      denominator,
+      denominatorEstimated: estimated,
+      supplementCount: 0,
       survivalRate,
       grade: rateLevel(survivalRate),
       gradeManual: false,
       createdAt: stamp,
       updatedAt: stamp,
-      revision: 2,
+      revision: 3,
     };
     await putSurvey(row);
     set({ revision: get().revision + 1 });
@@ -109,8 +106,10 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
   async updateSurvey(surveyId, draft) {
     const existing = await db.surveys.get(surveyId);
     if (!existing) return;
-    const total = totalPlantedOf(draft.plotId);
-    const survivalRate = calcSurvivalRate(draft.aliveCount, total);
+    const plantings = usePlotStore.getState().plantings;
+    const { denominator, estimated } = computeSurveyDenominator(draft.plotId, draft.date, plantings);
+    const supplement = typeof existing.supplementCount === 'number' ? existing.supplementCount : 0;
+    const survivalRate = calcSurveySurvivalRate(draft.aliveCount, supplement, denominator);
     await putSurvey({
       ...existing,
       plotId: draft.plotId,
@@ -118,6 +117,9 @@ export const useSurveyStore = create<SurveyStoreState>((set, get) => ({
       date: draft.date,
       aliveCount: draft.aliveCount,
       avgHeightCm: draft.avgHeightCm,
+      denominator,
+      denominatorEstimated: estimated,
+      supplementCount: supplement,
       survivalRate,
     });
     set({ revision: get().revision + 1 });

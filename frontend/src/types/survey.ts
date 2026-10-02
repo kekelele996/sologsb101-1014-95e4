@@ -23,11 +23,24 @@ export interface Survey {
   round: number;
   /** 验收日期 YYYY-MM-DD */
   date: string;
-  /** 成活株数 */
+  /** 成活株数（验收员当天实测的成活株数，补植增补不计入这里） */
   aliveCount: number;
   /** 平均株高（厘米） */
   avgHeightCm: number;
-  /** 成活率（百分比，保留 1 位小数）——默认由成活株数 / 栽植总株数派生 */
+  /**
+   * 验收当天固定的栽植总数（成活率分母）。
+   * 仅统计 plantDate <= 验收日期的栽植记录，验收之后新增的栽植只影响后面的测次，
+   * 已经定版的测次分母不动。
+   */
+  denominator: number;
+  /** 分母是否为估算值：查不到验收当天的栽植记录时，按现有栽植总数估算并置 true */
+  denominatorEstimated: boolean;
+  /**
+   * 增补株数（补植完成回写时单独标出，不混入 aliveCount）。
+   * 补植完成只更新最新测次的增补数，早先测次不动。
+   */
+  supplementCount: number;
+  /** 成活率（百分比，保留 1 位小数）=（成活株数 + 增补株数）/ 固定分母 × 100 */
   survivalRate: number;
   /** 成活率等级——默认按区间自动判定，可人工批量调整 */
   grade: RateLevel;

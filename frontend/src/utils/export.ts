@@ -10,7 +10,8 @@ import type { Planting } from '../types/planting';
 import type { Seedling } from '../types/seedling';
 import type { Replant } from '../types/replant';
 import { RATE_LEVEL_LABEL } from '../types/survey';
-import { calcSurvivalRate, percentText, round1 } from './rate';
+import { buildSurvivalSummary } from '../hooks/useSurvivalRate';
+import { percentText, round1 } from './rate';
 import { stampSuffix } from './id';
 
 /** 触发浏览器下载 */
@@ -107,12 +108,12 @@ export function exportSummaryCsv(
   const lines: string[] = [header.map(csvCell).join(',')];
   plots.forEach((plot) => {
     const plotSeedlings = seedlings.filter((row) => row.plotId === plot.id);
-    const plotPlantings = plantings.filter((row) => row.plotId === plot.id);
-    const plotSurveys = surveys.filter((row) => row.plotId === plot.id).sort((a, b) => a.round - b.round);
     const plotReplants = replants.filter((row) => row.plotId === plot.id);
-    const total = plotPlantings.reduce((acc, row) => acc + row.count, 0);
-    const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
-    const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    // 与验收台、补植页同一口径：成活率按测次固定分母 + 增补株数派生
+    const summary = buildSurvivalSummary(plot.id, surveys, plantings);
+    const total = summary.totalCount;
+    const latest = summary.latest;
+    const rate = latest ? latest.rate : 0;
     lines.push(
       [
         plot.name,
@@ -124,11 +125,11 @@ export function exportSummaryCsv(
         plotSeedlings.length,
         plotSeedlings.reduce((acc, row) => acc + row.quantity, 0),
         total,
-        plotSurveys.length,
+        summary.points.length,
         latest ? `第 ${latest.round} 测次` : '未验收',
         latest ? latest.aliveCount : 0,
         round1(rate),
-        latest ? RATE_LEVEL_LABEL[latest.grade] : '—',
+        latest ? RATE_LEVEL_LABEL[latest.level] : '—',
         latest ? latest.avgHeightCm : 0,
         plot.missingCount,
         plotReplants.length,
@@ -176,10 +177,11 @@ export function buildSummaryText(
 ): string {
   const lines: string[] = [`【红树林修复成活率通报】共 ${plots.length} 个地块`];
   plots.forEach((plot) => {
-    const total = plantings.filter((row) => row.plotId === plot.id).reduce((acc, row) => acc + row.count, 0);
-    const plotSurveys = surveys.filter((row) => row.plotId === plot.id).sort((a, b) => a.round - b.round);
-    const latest = plotSurveys.length > 0 ? plotSurveys[plotSurveys.length - 1] : null;
-    const rate = latest ? calcSurvivalRate(latest.aliveCount, total) : 0;
+    // 与验收台、补植页同一口径：成活率按测次固定分母 + 增补株数派生
+    const summary = buildSurvivalSummary(plot.id, surveys, plantings);
+    const total = summary.totalCount;
+    const latest = summary.latest;
+    const rate = latest ? latest.rate : 0;
     const pending = replants.filter((row) => row.plotId === plot.id && row.state !== '已复核').length;
     lines.push(
       `· ${plot.name}（${plot.tideZone}潮位带 / ${plot.substrate}）栽植 ${total} 株，最新成活率 ${

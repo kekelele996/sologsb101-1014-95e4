@@ -9,7 +9,8 @@ import type { Planting } from '../types/planting';
 import { db, initDatabase } from '../utils/db';
 import {
   SURVIVAL_WARN_RATE,
-  calcSurvivalRate,
+  calcSurveySurvivalRate,
+  computeSurveyDenominator,
   heightGrowth,
   rateLevel,
   round1,
@@ -23,7 +24,13 @@ export interface SurvivalPoint {
   date: string;
   aliveCount: number;
   avgHeightCm: number;
-  /** 该测次的成活率（%） */
+  /** 增补株数（补植完成回写，单独标出） */
+  supplementCount: number;
+  /** 该测次固定的栽植总数（成活率分母） */
+  denominator: number;
+  /** 分母是否为估算值 */
+  denominatorEstimated: boolean;
+  /** 该测次的成活率（%）=（成活 + 增补）/ 固定分母 */
   rate: number;
   /** 是否被人工复核过等级 */
   gradeManual: boolean;
@@ -33,7 +40,7 @@ export interface SurvivalPoint {
 /** 单个地块的成活率派生汇总 */
 export interface SurvivalSummary {
   plotId: string;
-  /** 栽植总株数 */
+  /** 当前栽植总株数（全部栽植记录合计，随补记浮动） */
   totalCount: number;
   /** 按测次排序的数据点 */
   points: SurvivalPoint[];
@@ -49,12 +56,26 @@ export interface SurvivalSummary {
   heightDelta: number;
   /** 株高增幅百分比（%） */
   heightPct: number;
-  /** 建议补植株数 */
+  /** 建议补植株数（按最新测次固定分母与成活株数测算） */
   suggestReplant: number;
   /** 最新等级 */
   level: RateLevel;
   /** 是否低于告警阈值 */
   warn: boolean;
+}
+
+/**
+ * 解析测次的成活率分母：优先用测次自带的固定分母（冻结验收当天的栽植总数）；
+ * 旧数据缺分母时按验收日期补算，仍查不到则按现有总数估算。
+ */
+export function resolveSurveyDenominator(
+  survey: Survey,
+  plantings: Planting[],
+): { denominator: number; estimated: boolean } {
+  if (typeof survey.denominator === 'number' && survey.denominator > 0) {
+    return { denominator: survey.denominator, estimated: survey.denominatorEstimated === true };
+  }
+  return computeSurveyDenominator(survey.plotId, survey.date, plantings);
 }
 
 /** 纯函数：由验收记录与栽植记录派生地块成活率汇总 */
@@ -72,13 +93,18 @@ export function buildSurvivalSummary(
     .filter((row) => row.plotId === plotId)
     .sort((a, b) => a.round - b.round)
     .map((row) => {
-      const rate = totalCount > 0 ? calcSurvivalRate(row.aliveCount, totalCount) : row.survivalRate;
+      const { denominator, estimated } = resolveSurveyDenominator(row, plantings);
+      const supplement = typeof row.supplementCount === 'number' ? row.supplementCount : 0;
+      const rate = calcSurveySurvivalRate(row.aliveCount, supplement, denominator);
       return {
         surveyId: row.id,
         round: row.round,
         date: row.date,
         aliveCount: row.aliveCount,
         avgHeightCm: row.avgHeightCm,
+        supplementCount: supplement,
+        denominator,
+        denominatorEstimated: estimated,
         rate,
         gradeManual: row.gradeManual,
         level: row.gradeManual ? row.grade : rateLevel(rate),
@@ -99,7 +125,7 @@ export function buildSurvivalSummary(
     trend: latest && previous ? round1(latest.rate - previous.rate) : 0,
     heightDelta: growth.delta,
     heightPct: growth.pct,
-    suggestReplant: latest ? suggestReplantCount(totalCount, latest.aliveCount) : totalCount,
+    suggestReplant: latest ? suggestReplantCount(latest.denominator, latest.aliveCount + latest.supplementCount) : totalCount,
     level: latest ? latest.level : 'poor',
     warn: latest !== null && latest.rate < threshold,
   };

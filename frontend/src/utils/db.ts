@@ -11,7 +11,7 @@ import type { Seedling } from '../types/seedling';
 import type { Planting } from '../types/planting';
 import type { Survey } from '../types/survey';
 import type { Replant, ReplantState } from '../types/replant';
-import { rateLevel } from './rate';
+import { calcSurveySurvivalRate, computeSurveyDenominator, rateLevel } from './rate';
 import { nowIso, today } from './id';
 import { seedDatabase } from './seed';
 
@@ -19,10 +19,10 @@ import { seedDatabase } from './seed';
 export const DB_NAME = 'gbmangrove';
 
 /** 当前数据结构版本号（每次调整字段结构必须 +1 并补迁移） */
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 /** 数据行结构修订号 */
-export const ROW_REVISION = 2;
+export const ROW_REVISION = 3;
 
 class MangroveDatabase extends Dexie {
   plots!: Table<Plot, string>;
@@ -44,7 +44,7 @@ class MangroveDatabase extends Dexie {
     });
 
     // ---------- v2：补齐索引与回写字段，并迁移历史数据 ----------
-    this.version(DB_SCHEMA_VERSION)
+    this.version(2)
       .stores({
         plots: 'id, name, tideZone, substrate, restoreMode, state, createdAt, updatedAt',
         seedlings: 'id, plotId, species, source, arrivalDate, quantity',
@@ -79,6 +79,56 @@ class MangroveDatabase extends Dexie {
           const rate = typeof row.survivalRate === 'number' ? row.survivalRate : 0;
           if (typeof row.grade !== 'string') row.grade = rateLevel(rate);
           if (typeof row.gradeManual !== 'boolean') row.gradeManual = false;
+        });
+      });
+
+    // ---------- v3：验收测次固定分母 + 增补株数 ----------
+    // 每个测次固定验收当天的栽植总数（plantDate <= 验收日期），之后新增栽植只影响后面的测次；
+    // 补植完成只更新最新测次的增补株数，已定测次不动。
+    this.version(3)
+      .stores({
+        plots: 'id, name, tideZone, substrate, restoreMode, state, createdAt, updatedAt',
+        seedlings: 'id, plotId, species, source, arrivalDate, quantity',
+        plantings: 'id, plotId, seedlingId, plantDate, spacingM',
+        surveys: 'id, plotId, [plotId+round], date, grade',
+        replants: 'id, plotId, planDate, state, species',
+      })
+      .upgrade(async (tx) => {
+        const plantings = await tx.table('plantings').toArray();
+        await tx.table('surveys').toCollection().modify((row: Record<string, unknown>) => {
+          const plotId = String(row.plotId ?? '');
+          const date = String(row.date ?? '');
+          const plotPlantings = (plantings as Array<Record<string, unknown>>).filter((p) => String(p.plotId ?? '') === plotId);
+          // 补齐当时分母：只统计验收当天（含）之前的栽植记录
+          if (typeof row.denominator !== 'number' || row.denominator <= 0) {
+            const exact = plotPlantings
+              .filter((p) => String(p.plantDate ?? '') <= date)
+              .reduce((acc, p) => acc + (typeof p.count === 'number' ? (p.count as number) : 0), 0);
+            if (exact > 0) {
+              row.denominator = exact;
+              row.denominatorEstimated = false;
+            } else {
+              // 查不到当时栽植记录：按现有栽植总数估算
+              const current = plotPlantings.reduce(
+                (acc, p) => acc + (typeof p.count === 'number' ? (p.count as number) : 0),
+                0,
+              );
+              row.denominator = current;
+              row.denominatorEstimated = current > 0;
+            }
+          }
+          if (typeof row.supplementCount !== 'number') row.supplementCount = 0;
+          // 按固定分母与增补株数重算成活率，保证历史测次口径一致
+          const denominator = typeof row.denominator === 'number' ? (row.denominator as number) : 0;
+          const alive = typeof row.aliveCount === 'number' ? (row.aliveCount as number) : 0;
+          const supplement = typeof row.supplementCount === 'number' ? (row.supplementCount as number) : 0;
+          const rate =
+            denominator > 0
+              ? Math.round(Math.min(100, Math.max(0, ((alive + supplement) / denominator) * 100)) * 10) / 10
+              : 0;
+          row.survivalRate = rate;
+          if (row.gradeManual !== true) row.grade = rateLevel(rate);
+          row.revision = ROW_REVISION;
         });
       });
   }
@@ -235,7 +285,9 @@ export async function removeReplant(id: string): Promise<void> {
 
 /**
  * 补植完成回写：
- * 1）扣减地块缺株数；2）写入最近补植日期；3）按补植后的总株数重算最新一次验收的成活率。
+ * 1）扣减地块缺株数；2）写入最近补植日期；
+ * 3）只更新最新测次：把本次补植株数累加到该测次的「增补株数」（不改动验收员实测的成活株数），
+ *    并按该测次固定分母重算成活率；早先已经定版的测次一律不动。
  */
 export async function applyReplantCompletion(replantId: string): Promise<void> {
   await db.transaction('rw', db.plots, db.replants, db.surveys, db.plantings, async () => {
@@ -251,16 +303,24 @@ export async function applyReplantCompletion(replantId: string): Promise<void> {
       updatedAt: nowIso(),
     });
 
-    const plantings = await db.plantings.where('plotId').equals(plot.id).toArray();
-    const total = plantings.reduce((acc, item) => acc + item.count, 0);
-    const surveys = await db.surveys.where('plotId').equals(plot.id).toArray();
+    const [surveys, plantings] = await Promise.all([
+      db.surveys.where('plotId').equals(plot.id).toArray(),
+      db.plantings.where('plotId').equals(plot.id).toArray(),
+    ]);
     if (surveys.length === 0) return;
     const latest = surveys.reduce((acc, item) => (item.round > acc.round ? item : acc));
-    // 补植后按「原成活株数 + 本次补植株数」重新计算成活率
-    const aliveAfter = latest.aliveCount + replant.missingCount;
-    const rate = total > 0 ? Math.round(Math.min(100, (aliveAfter / total) * 100) * 10) / 10 : latest.survivalRate;
+    // 分母优先用测次验收当天固定的栽植总数；缺失时才退回现有栽植总数估算
+    const storedDenominator = typeof latest.denominator === 'number' ? latest.denominator : 0;
+    const denominator =
+      storedDenominator > 0 ? storedDenominator : plantings.reduce((acc, item) => acc + item.count, 0);
+    // 增补株数单独累加，不混入成活株数
+    const supplement = (typeof latest.supplementCount === 'number' ? latest.supplementCount : 0) + replant.missingCount;
+    const rate =
+      denominator > 0
+        ? Math.round(Math.min(100, Math.max(0, ((latest.aliveCount + supplement) / denominator) * 100)) * 10) / 10
+        : latest.survivalRate;
     await db.surveys.update(latest.id, {
-      aliveCount: aliveAfter,
+      supplementCount: supplement,
       survivalRate: rate,
       grade: latest.gradeManual ? latest.grade : rateLevel(rate),
       updatedAt: nowIso(),
@@ -323,7 +383,23 @@ export async function importSnapshot(snapshot: DatabaseSnapshot): Promise<void> 
     await db.plots.bulkPut(snapshot.plots.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.seedlings.bulkPut(snapshot.seedlings.map((row) => ({ ...row, revision: ROW_REVISION })));
     await db.plantings.bulkPut(snapshot.plantings.map((row) => ({ ...row, revision: ROW_REVISION })));
-    await db.surveys.bulkPut(snapshot.surveys.map((row) => ({ ...row, revision: ROW_REVISION })));
+    // 验收测次补齐固定分母与增补株数（兼容 v2 存档导入），成活率按固定分母重算
+    const surveys = snapshot.surveys.map((row) => {
+      const { denominator, estimated } =
+        typeof row.denominator === 'number' && row.denominator > 0
+          ? { denominator: row.denominator, estimated: row.denominatorEstimated === true }
+          : computeSurveyDenominator(row.plotId, row.date, snapshot.plantings);
+      const supplement = typeof row.supplementCount === 'number' ? row.supplementCount : 0;
+      return {
+        ...row,
+        denominator,
+        denominatorEstimated: estimated,
+        supplementCount: supplement,
+        survivalRate: calcSurveySurvivalRate(row.aliveCount, supplement, denominator),
+        revision: ROW_REVISION,
+      };
+    });
+    await db.surveys.bulkPut(surveys);
     await db.replants.bulkPut(snapshot.replants.map((row) => ({ ...row, revision: ROW_REVISION })));
   });
 }

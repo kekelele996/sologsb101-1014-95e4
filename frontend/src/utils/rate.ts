@@ -6,6 +6,7 @@
  * - 株高增幅与补植建议
  */
 import { RATE_LEVEL_LABEL, type RateLevel } from '../types/survey';
+import type { Planting } from '../types/planting';
 
 /** 1 亩 = 666.6667 平方米 */
 export const MU_TO_M2 = 666.6667;
@@ -44,6 +45,39 @@ export function m2ToMu(areaM2: number): number {
 export function calcSurvivalRate(aliveCount: number, totalCount: number): number {
   if (!Number.isFinite(aliveCount) || !Number.isFinite(totalCount) || totalCount <= 0) return 0;
   return round1(Math.max(0, Math.min(100, (aliveCount / totalCount) * 100)));
+}
+
+/**
+ * 含增补株数的成活率（%）=（成活株数 + 增补株数）/ 固定分母 × 100
+ * 补植完成回写时，增补株数单独累加在测次上、不混入成活株数；
+ * 分母为该测次验收当天固定的栽植总数。
+ */
+export function calcSurveySurvivalRate(
+  aliveCount: number,
+  supplementCount: number,
+  denominator: number,
+): number {
+  if (!Number.isFinite(denominator) || denominator <= 0) return 0;
+  const numerator = (Number.isFinite(aliveCount) ? aliveCount : 0) + (Number.isFinite(supplementCount) ? supplementCount : 0);
+  return round1(Math.max(0, Math.min(100, (numerator / denominator) * 100)));
+}
+
+/**
+ * 计算某测次验收当天固定的栽植总数（成活率分母）。
+ * 只统计 plantDate <= 验收日期的栽植记录；查不到（合计为 0）时按现有栽植总数估算。
+ */
+export function computeSurveyDenominator(
+  plotId: string,
+  surveyDate: string,
+  plantings: Planting[],
+): { denominator: number; estimated: boolean } {
+  const plotPlantings = plantings.filter((row) => row.plotId === plotId);
+  const exact = plotPlantings
+    .filter((row) => row.plantDate <= surveyDate)
+    .reduce((acc, row) => acc + row.count, 0);
+  if (exact > 0) return { denominator: exact, estimated: false };
+  const current = plotPlantings.reduce((acc, row) => acc + row.count, 0);
+  return { denominator: current, estimated: current > 0 };
 }
 
 /** 按成活率数值判定等级 */
